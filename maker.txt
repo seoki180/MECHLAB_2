@@ -1,0 +1,5 @@
+cyntec
+infineon
+kyocera
+murata
+kemet

@@ -1,0 +1,11 @@
+cyntec,default
+infineon,default
+kyocera,CM
+kyocera,CT
+kyocera,CX
+murata,GJM
+murata,GRM(A)
+murata,GRM(B)
+murata,LQP
+murata,NCP
+kemet,default
