@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import pkgutil
+import sys
 from collections.abc import Iterable
 from typing import TypeAlias
 
@@ -51,4 +52,26 @@ for _parser_cls in _iter_parser_classes():
     register(_parser_cls)
 
 
-__all__ = ["BaseParser", "REGISTRY", "get_parser", "makers", "models_for", "register"]
+def reload_registry() -> list[ParserKey]:
+    """새 파서 모듈을 스캔해 등록하고 새로 추가된 키 목록을 반환한다."""
+    package_name = __name__
+    new_keys: list[ParserKey] = []
+    for module_info in pkgutil.iter_modules(__path__):
+        if module_info.name in {"base"}:
+            continue
+        full_name = f"{package_name}.{module_info.name}"
+        if full_name in sys.modules:
+            continue
+        module = importlib.import_module(full_name)
+        for _, obj in inspect.getmembers(module, inspect.isclass):
+            if obj is BaseParser:
+                continue
+            if issubclass(obj, BaseParser) and obj.__module__ == module.__name__:
+                key = (obj.maker, obj.model)
+                if key not in REGISTRY:
+                    register(obj)
+                    new_keys.append(key)
+    return new_keys
+
+
+__all__ = ["BaseParser", "REGISTRY", "get_parser", "makers", "models_for", "register", "reload_registry"]
