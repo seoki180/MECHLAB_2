@@ -88,6 +88,7 @@ class MainFrame(wx.Frame):
         self._displayed_pairs: list[tuple[str, str]] = list(self._all_pairs)
         self._checked_pairs: set[tuple[str, str]] = set()
         self.current_csv: Path | None = None
+        self.last_extraction_items: list[tuple[str, str, Path]] = []
         self.worker: threading.Thread | None = None
         self._build_ui()
         self._bind_events()
@@ -258,11 +259,9 @@ class MainFrame(wx.Frame):
         self._refresh_default_input()
 
     def _refresh_default_input(self) -> None:
-        selected = self._selected_parser_classes()
-        if len(selected) == 1 and not self.txt_input.GetValue():
-            input_folder = getattr(selected[0], "input_folder", "")
-            if input_folder:
-                self.txt_input.SetValue(str(PARSER_DIR / input_folder))
+        # 새 규칙: 사용자는 상위 input/ 폴더를 직접 지정한다.
+        # 각 파서는 그 안의 self.input_folder 하위폴더에서만 PDF를 읽는다.
+        return
 
     # ── 상태 / 유틸 ─────────────────────────────────────────────────────────
 
@@ -328,6 +327,24 @@ class MainFrame(wx.Frame):
         wx.CallAfter(self._log, f"> Input: {input_dir}")
         wx.CallAfter(self._log, f"> Output: {output_dir}")
 
+        expected_subfolders = {cls.input_folder for cls in REGISTRY.values()}
+        selected_subfolders = {
+            REGISTRY[pair].input_folder for pair in pairs if pair in REGISTRY
+        }
+        unknown_subdirs: list[str] = []
+        unselected_subdirs: list[str] = []
+        top_level_pdfs: list[str] = []
+        for entry in input_dir.iterdir():
+            if entry.is_dir():
+                if entry.name in selected_subfolders:
+                    continue
+                if entry.name in expected_subfolders:
+                    unselected_subdirs.append(entry.name)
+                else:
+                    unknown_subdirs.append(entry.name)
+            elif entry.is_file() and entry.suffix.lower() == ".pdf":
+                top_level_pdfs.append(entry.name)
+
         success_items: list[tuple[str, str, Path]] = []
         failed_pairs: list[tuple[str, str]] = []
 
@@ -343,6 +360,25 @@ class MainFrame(wx.Frame):
             except Exception as exc:
                 wx.CallAfter(self._log, f">   → ERROR: {exc}")
                 failed_pairs.append((maker, model))
+
+        if unselected_subdirs:
+            wx.CallAfter(
+                self._log,
+                f"> (info) skipped subfolders (parser not selected): {', '.join(sorted(unselected_subdirs))}",
+            )
+        if unknown_subdirs:
+            wx.CallAfter(
+                self._log,
+                f"> WARNING: unknown subfolders (no matching parser): {', '.join(sorted(unknown_subdirs))}",
+            )
+        if top_level_pdfs:
+            preview = ", ".join(top_level_pdfs[:5])
+            suffix = " ..." if len(top_level_pdfs) > 5 else ""
+            wx.CallAfter(
+                self._log,
+                f"> WARNING: {len(top_level_pdfs)} PDF(s) at top level were ignored "
+                f"(must be inside a brand subfolder): {preview}{suffix}",
+            )
 
         if total > 1 and success_items:
             compiled_path = output_dir / "compiled_output.csv"
@@ -365,6 +401,7 @@ class MainFrame(wx.Frame):
         failed_pairs: list[tuple[str, str]],
         primary_csv: Path | None,
     ) -> None:
+        self.last_extraction_items = list(success_items)
         if primary_csv:
             self.current_csv = primary_csv
             try:
@@ -414,17 +451,33 @@ class MainFrame(wx.Frame):
         return rows_written
 
     def _compile_outputs(self) -> None:
+        if not self.last_extraction_items:
+            wx.MessageBox(
+                "통합할 EXTRACTION 결과가 없습니다.\nEXTRACTION을 먼저 실행하세요.",
+                "알림",
+                wx.OK | wx.ICON_INFORMATION,
+            )
+            return
+
+        parser_items = [item for item in self.last_extraction_items if item[2].exists()]
+        if not parser_items:
+            wx.MessageBox(
+                "직전 EXTRACTION 결과 CSV를 찾을 수 없습니다.",
+                "오류",
+                wx.OK | wx.ICON_ERROR,
+            )
+            return
+
         output_dir = Path(self.txt_output.GetValue()).expanduser()
         if not output_dir.is_dir():
-            wx.MessageBox(f"출력 폴더가 없습니다:\n{output_dir}", "오류", wx.OK | wx.ICON_ERROR)
-            return
+            output_dir = parser_items[0][2].parent
 
         dlg = wx.FileDialog(
             self,
             message="통합 CSV 저장",
             defaultDir=str(output_dir),
             defaultFile="compiled_output.csv",
-            wildcard="CSV files (*.csv)|*.csv",
+            wildcard="CSV files (*.csv)|*.csv|All files (*.*)|*.*",
             style=wx.FD_SAVE | wx.FD_OVERWRITE_PROMPT,
         )
         if dlg.ShowModal() != wx.ID_OK:
@@ -433,21 +486,11 @@ class MainFrame(wx.Frame):
         compiled_path = Path(dlg.GetPath())
         dlg.Destroy()
 
-        parser_items = []
-        for maker, model in sorted(REGISTRY):
-            parser = get_parser(maker, model)
-            path = output_dir / parser.output_csv_name
-            if path.exists():
-                parser_items.append((maker, model, path))
-
-        if not parser_items:
-            wx.MessageBox("통합할 CSV가 없습니다.", "알림", wx.OK | wx.ICON_INFORMATION)
-            return
-
         rows_written = self._compile_csvs(parser_items, compiled_path)
         self.current_csv = compiled_path
         self.grid.load_csv(compiled_path)
-        self._log(f"> Compilation done. {rows_written} rows saved: {compiled_path}")
+        sources = ", ".join(f"{m}/{md}" for m, md, _ in parser_items)
+        self._log(f"> Compilation done. {rows_written} rows from [{sources}] → {compiled_path}")
         self._set_status(f"통합 완료: {compiled_path.name} ({rows_written} rows)")
 
     # ── Parser 추가 ──────────────────────────────────────────────────────────

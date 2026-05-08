@@ -51,6 +51,44 @@ def _find_fitz_site_packages() -> Path | None:
     return None
 
 
+@contextmanager
+def fitz_isolation():
+    """
+    fitz/frontend 모듈을 깨끗한 상태로 import 할 수 있게 sys.path/sys.modules를 격리.
+    venv에 잘못된 fitz 패키지가 있어도 conda PyMuPDF를 우선 사용.
+
+    사용:
+        with fitz_isolation():
+            import fitz
+            ...
+    """
+    old_path = list(sys.path)
+    old_modules = {
+        name: module
+        for name, module in sys.modules.items()
+        if name == "fitz" or name.startswith("fitz.")
+        or name == "frontend" or name.startswith("frontend.")
+    }
+    for name in old_modules:
+        sys.modules.pop(name, None)
+
+    fitz_sp = _find_fitz_site_packages()
+    new_path: list[str] = []
+    if fitz_sp:
+        new_path.append(str(fitz_sp))
+    new_path.extend(p for p in old_path if ".venv" not in p and p not in new_path)
+    sys.path[:] = new_path
+    try:
+        yield
+    finally:
+        sys.path[:] = old_path
+        for name in list(sys.modules):
+            if (name == "fitz" or name.startswith("fitz.")
+                    or name == "frontend" or name.startswith("frontend.")):
+                sys.modules.pop(name, None)
+        sys.modules.update(old_modules)
+
+
 class BaseParser(ABC):
     maker: str
     model: str
@@ -152,6 +190,16 @@ class LegacyScriptParser(BaseParser):
         if not input_dir.is_dir():
             raise FileNotFoundError(f"Input folder not found: {input_dir}")
 
+        brand_dir = input_dir / self.input_folder
+        if not brand_dir.is_dir():
+            raise FileNotFoundError(
+                f"Expected brand subfolder not found: {brand_dir}\n"
+                f"Place {self.maker}/{self.model} PDFs under '{self.input_folder}/' "
+                f"inside the input directory."
+            )
+        if not any(brand_dir.glob("*.pdf")) and not any(brand_dir.glob("*.PDF")):
+            self.emit(f">   (warning) {brand_dir} contains no PDFs")
+
         script_path = LEGACY_PARSER_DIR / self.script_name
         if not script_path.exists():
             raise FileNotFoundError(f"Legacy parser not found: {script_path}")
@@ -161,7 +209,7 @@ class LegacyScriptParser(BaseParser):
         with tempfile.TemporaryDirectory(prefix="mechlab_parser_") as tmp:
             work_dir = Path(tmp)
             shutil.copy2(script_path, work_dir / self.script_name)
-            copy_or_link(input_dir, work_dir / self.input_folder)
+            copy_or_link(brand_dir, work_dir / self.input_folder)
             if (LEGACY_PARSER_DIR / "mask").exists():
                 copy_or_link(LEGACY_PARSER_DIR / "mask", work_dir / "mask")
             (work_dir / "output").mkdir(exist_ok=True)
